@@ -1,0 +1,21 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -385,17 +385,18 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
+ 
+ bool
+ IOCoreSurfaceRoot::start(IOService *provider)
+ {
+ 	printf("SWEET SURF: IOCoreSurfaceRoot::start entered\n");
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+ 	sweet_surface_init_lock();
+ 	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
+ 	registerService();
+ 	IOLog("SWEET SURF: IOCoreSurfaceRoot registered\n");
++	IOLog("SWEET SURF: IOSurfaceRoot published\n");
+ 	return true;
+ }

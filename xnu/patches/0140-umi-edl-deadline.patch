@@ -1,0 +1,108 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -726,7 +726,10 @@
+ static int sweet_edl_chan;
+ static uint32_t sweet_edl_after;               /* armed by boot-arg */
+ static uint32_t _Atomic sweet_edl_flushes;     /* successful flush count */
++static uint32_t sweet_edl_secs;                /* hard deadline (boot-arg) */
++static uint64_t sweet_edl_deadline;            /* absolute, 0 = none */
+ static void sweet_edl_thread(void *, wait_result_t);
++void sweet_edl_check(void);
+ static void sweet_auto_download(void);
+ 
+ /* Called for all console output, any context: never blocks. */
+@@ -778,6 +781,7 @@
+ 			}
+ 		}
+ 	}
++	sweet_edl_check();
+ }
+ 
+ /*
+@@ -1175,20 +1179,50 @@
+ 	printf("SWEET EDL: reset returned 0x%llx\n", (unsigned long long)r[0]);
+ }
+ 
+-/* One shot, woken by the console path's flush counter. */
++/*
++ * The deadline check. It must not depend on a timed sleep: the sampler's
++ * assert_wait_deadline never expired on this port, so the deadline is tested
++ * from paths that already run on their own -- every console write and every
++ * display vsync -- and those merely wake the thread below.
++ */
++void
++sweet_edl_check(void)
++{
++	if (sweet_edl_secs == 0 || sweet_edl_deadline == 0) {
++		return;
++	}
++	if (mach_absolute_time() < sweet_edl_deadline) {
++		return;
++	}
++	wakeup(&sweet_edl_chan);
++}
++
++/* One shot, woken by the flush counter, the deadline check or the vsync. */
+ static void
+ sweet_edl_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	for (;;) {
+ 		/* Check before sleeping: a wakeup sent before the first sleep is not
+-		 * queued, and the flush counter is already past the mark by then. */
+-		if (sweet_edl_after != 0 &&
+-		    os_atomic_load(&sweet_edl_flushes, relaxed) >= sweet_edl_after) {
++		 * queued, and the counters are already past their marks by then. */
++		int by_count = sweet_edl_after != 0 &&
++		    os_atomic_load(&sweet_edl_flushes, relaxed) >= sweet_edl_after;
++		int by_time = sweet_edl_secs != 0 && sweet_edl_deadline != 0 &&
++		    mach_absolute_time() >= sweet_edl_deadline;
++
++		if (by_count || by_time) {
++			printf("SWEET EDL: %s (%u flushes, %u s), downloading\n",
++			    by_count ? "enough flushes" : "deadline",
++			    (unsigned)os_atomic_load(&sweet_edl_flushes, relaxed),
++			    (unsigned)sweet_edl_secs);
+ 			sweet_edl_after = 0;	/* one shot */
++			sweet_edl_secs = 0;
+ 			sweet_auto_download();
+ 			continue;
+ 		}
+-		(void)tsleep(&sweet_edl_chan, PZERO, "sweetedl", 0);
++		uint64_t deadline;
++		clock_interval_to_deadline(5, NSEC_PER_SEC, &deadline);
++		assert_wait_deadline(&sweet_edl_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
+ 	}
+ }
+ 
+@@ -1251,18 +1285,27 @@
+ 	sweet_log_flush_to_disk();
+ 	{
+ 		uint32_t after = 0;
++		uint32_t secs = 0;
+ 
+-		if (PE_parse_boot_argn("sweetedl_after", &after, sizeof(after)) &&
+-		    after > 0) {
++		PE_parse_boot_argn("sweetedl_after", &after, sizeof(after));
++		PE_parse_boot_argn("sweetedl_secs", &secs, sizeof(secs));
++		if (after > 0 || secs > 0) {
+ 			thread_t thread;
+ 
+ 			sweet_edl_after = after;
++			sweet_edl_secs = secs;
++			if (secs > 0) {
++				clock_interval_to_deadline(secs, NSEC_PER_SEC,
++				    &sweet_edl_deadline);
++			}
+ 			if (kernel_thread_start(sweet_edl_thread, NULL, &thread) ==
+ 			    KERN_SUCCESS) {
+ 				thread_deallocate(thread);
+-				printf("SWEET EDL: armed after %u good flushes\n", after);
++				printf("SWEET EDL: armed after %u good flushes or %u s\n",
++				    after, secs);
+ 			} else {
+ 				sweet_edl_after = 0;
++				sweet_edl_secs = 0;
+ 				printf("SWEET EDL: thread start failed\n");
+ 			}
+ 		}
